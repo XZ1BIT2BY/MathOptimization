@@ -15,7 +15,7 @@ def parse_equation(eq_line):
         elif num == '-':
             val = -1
         else:
-            val = int(num)
+            val = int(num)   # при желании можно заменить на float(num)
         coeffs[var] = val
     return coeffs, sign, float(right)
 
@@ -42,7 +42,6 @@ def read_lp(filename):
     for ln in lines[2:]:
         low = ln.lower()
         if low.startswith('free'):
-            # строка вида "free: x1 x3 ..."
             for var in re.findall(r'(x\d+)', ln):
                 free_vars.add(var)
             continue
@@ -54,8 +53,7 @@ def read_lp(filename):
 # ---------- Обработка свободных переменных ----------
 def transform_free_variables(obj, constraints, free_vars):
     """
-    Каждую свободную xk заменяем на xk_p - xk_m, где обе >= 0.
-    Возвращаем новый obj, новые constraints и mapping для восстановления решения.
+    Каждую свободную xk заменяем на xk_p - xk_m, обе >= 0.
     """
     free_map = {}  # 'x2' -> ('x2_p', 'x2_m')
     for v in free_vars:
@@ -91,10 +89,12 @@ def transform_free_variables(obj, constraints, free_vars):
 
 # ---------- Приведение задачи к канонической форме ----------
 def build_canonical(goal, obj, constraints):
+    # сначала соберём все переменные из уже преобразованных ограничений/цели
     orig_vars = sorted(
         {v for c, _, _ in constraints for v in c} | set(obj.keys()),
         key=lambda x: int(re.findall(r'\d+', x)[0])
     )
+
     A_rows = []
     b = []
     row_types = []
@@ -103,25 +103,39 @@ def build_canonical(goal, obj, constraints):
     added_per_row = []
 
     for i, (coeffs, sign, rhs) in enumerate(constraints):
-        row = [coeffs.get(v, 0) for v in orig_vars]
+        # НОРМАЛИЗАЦИЯ ПО ПРАВОЙ ЧАСТИ:
+        # если rhs < 0, умножаем всё на -1 и переворачиваем знак
+        if rhs < -EPS:
+            rhs = -rhs
+            new_coeffs = {var: -coef for var, coef in coeffs.items()}
+            coeffs = new_coeffs
+            if sign == "<=":
+                sign = ">="
+            elif sign == ">=":
+                sign = "<="
+            # '=' не меняем
+
+        row = [coeffs.get(v, 0.0) for v in orig_vars]
         added = []
+
         if sign == '<=':
             s = f"s{i+1}"
             added.append(s)
             slack_vars.append(s)
-            row += [1]
+            row += [1.0]
         elif sign == '>=':
             s = f"s{i+1}"
             a = f"a{i+1}"
             added.extend([s, a])
             slack_vars.append(s)
             art_vars.append(a)
-            row += [-1, 1]
+            row += [-1.0, 1.0]
         elif sign == '=':
             a = f"a{i+1}"
             added.append(a)
             art_vars.append(a)
-            row += [1]
+            row += [1.0]
+
         A_rows.append(row)
         b.append(rhs)
         row_types.append(sign)
@@ -144,10 +158,10 @@ def build_canonical(goal, obj, constraints):
             added_vals = {}
             for j, var in enumerate(this_added):
                 added_vals[var] = A_rows[i][n_orig + j]
-            full_added_part = [added_vals.get(var, 0) for var in added_all]
+            full_added_part = [added_vals.get(var, 0.0) for var in added_all]
             A_rows[i] = A_rows[i][:n_orig] + full_added_part
 
-    c = [obj.get(v, 0) for v in orig_vars] + [0] * len(added_all)
+    c = [float(obj.get(v, 0.0)) for v in orig_vars] + [0.0] * len(added_all)
 
     return all_vars, A_rows, b, c, slack_vars, art_vars, row_types
 
@@ -301,7 +315,6 @@ def phase_one(all_vars, A, b, c, art_vars, row_types):
 def phase_two(all_vars, tableau, basic_vars, orig_c, goal):
     print("\n--- ПОИСК ОПТИМАЛЬНОГО РЕШЕНИЯ ---")
     n = len(all_vars)
-    # Для задачи max используем -c в строке F (классический подход)
     obj_row = [-orig_c[j] for j in range(n)] + [0.0]
     tableau[-1] = obj_row[:]
 
@@ -407,7 +420,12 @@ def main():
         else:
             orig_c.append(0.0)
 
-    tableau_final, basic_final = phase_two(all_vars_p, tableau_p, basic_p, orig_c, goal)
+    try:
+        tableau_final, basic_final = phase_two(all_vars_p, tableau_p, basic_p, orig_c, goal)
+    except ValueError as e:
+        print("\n--- РЕЗУЛЬТАТ РЕШЕНИЯ ---")
+        print(str(e))
+        return
 
     sol_all, Z = extract_solution(tableau_final, basic_final, all_vars_p, free_map)
 
